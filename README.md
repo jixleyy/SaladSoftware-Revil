@@ -1,108 +1,45 @@
-# SaladSoftware - A Kuriimu1/2 MT Framework-only Python Variant
-**Version 2.4.2**
+# RevilToolset-AutoBatch
 
-<img width="1540" height="987" alt="image" src="https://github.com/user-attachments/assets/68cb7792-2bfc-4af0-abc3-f6e084930680" />
+An updated version of my standalone Revil batch tool that works with SaladSoftware. It's as easy as going to the new tab in the GUI and telling the program where your files are. The only con is that, for now, you have to download RevilToolset yourself before you can use it.
 
+There are two paths you can take in using this program:
 
-- **Dark Mode UI**
-- **Drag & Drop Support** (Files and Folders)
-- **High-DPI / 4K Support**
-- **Atomic Writes** (Prevents corruption if a save fails)
-- **Threaded Scanning & Parallel Compression**
-- **Windows Context Menu Integration**
-- **Support for double-click .arc Preview**
+1. Include .arc extraction and mod + lmt -> gltf in one go (I recommend doing this)
+2. The old-fashioned method of extracting the arc *then* running the script. You don't have to do it this way, but if you already have a bunch of extracted files that you want consolidated into gltf then go for it!
 
-SaladSoftware uses Kuriimu (1) Karameru C# code logic adapted to Python. Original MTArc, Komponent, Encryption, and C# code processing logic belongs to IcySon55 and FanTranslatorInternational. I adapted it to Python, added a GUI with dark mode, logging, and stability features like atomic saves and memory safety caps.
+The output will go into a new folder where your chosen input is.
 
-## Dependencies
-If running from source, you must install the following:
-```bash
-pip install pycryptodome tkinterdnd2
-```
+I have only tested this program on Windows. If it doesn't work for you, then please do report any issues. My environment shouldn't be so specific that something would work for me but not for you, but I can't guarantee that.
 
-## Tab Descriptions
+(Building also might be broken right now... I would recommend just installing the dependencies and running SaladSoftware.py to be safe)
 
-### 1. Extract from ARC(s)
-- **Purpose:** Unpack an original game archive (.arc) into a folder.
-- **Usage:** Drag and drop .arc files or select them via the button.
-- **Output:** Each ARC is extracted into a subfolder next to the original file (e.g., `resident.arc` -> `resident_arc/`).
-- **Note:** Preserves internal folder structure.
+Happy modding!
 
-### 2. Repack Folder (In-Place)
-- **Purpose:** Rebuild an edited folder back into a byte-perfect .arc file. **(Recommended for Modding)**
-- **Usage:** Select the directory containing both your original `.arc` and your edited `_arc` folder.
-- **Logic:** 
-  - Finds pairs (e.g., `file.arc` and `file_arc`).
-  - Uses the original ARC to copy headers, version info, and unchanged files (High-Fidelity Rebuild).
-  - Only compresses files that have actually changed on disk.
-- **Safety:** 
-  - Creates a `.tmp` file first to ensure write success.
-  - Moves the original `.arc` and the source `_arc` folder into an `original_data` subfolder upon success.
-  - **Optional:** Can be set to delete `original_data` automatically after a successful rebuild.
+## Features
 
-### 3. Build New ARC from Folder
-- **Purpose:** Create a completely new .arc file from a folder of assets.
-- **Warning:** Uses default settings (Switch/PC hybrid defaults). Not recommended for modding existing files; use Tab 2 instead.
+- **MT: Revil Conversion Tab**: A new tab in SaladSoftware's UI to use the tool.
+- **Automatic Unpacking**: Extracts `.arc` archives using integrated MT logic.
+- **Smart Pairing**: Automatically matches animation files (`.lmt`) to models (`.mod`) by name.
+- **Recursive Scan**: Process entire folders and subfolders in one go.
+- **Batch Processing**: Handles multiple conversions with progress tracking and logging.
+- **Cleanup**: Automatically removes temporary `batch.json` files after successful conversion.
 
-### 4. Batch: Extract All in Folder
-- **Purpose:** Recursively scan a root directory for *any* .arc files and extract them.
-- **Output:** Creates `_arc` folders next to every found .arc file.
+## Requirements
 
-### 5. Batch: Repack Folders (In-Place)
-- **Purpose:** Recursively find and rebuild all ARCs from their extracted folders.
-- **Logic:** Same as Tab 2, but scans subdirectories.
-- **Cleanup:** Options to move originals to `original_data` or delete them after successful repacking.
+- **Python 3.8+**
+- **RevilToolset**: This *must* be installed somewhere on your computer, how else are you gonna use it?
+- **Python Dependencies**:
 
-### 6. Batch: Extract All (Single Folder / Flatten)
-- **Purpose:** Extract contents of many ARCs into one single "flat" folder.
-- **Usage:** Useful for dumping all textures or sounds to one place.
-- **Naming:** Filenames are prefixed with the source ARC name (e.g., `resident_arc_font.tex`) to prevent conflicts.
+  ```bash
+  pip install pycryptodome tkinterdnd2 tqdm
+  ```
 
-### 7. Advanced: Partial Extract (Internal ARC View)
-- **Purpose:** Preview and extract specific files without unpacking the whole archive.
-- **Usage:** 
-  - Load an ARC.
-  - Check boxes next to files or folders.
-  - Extract to specific location.
-- **Open up an .arc on Windows via double-click.**
+## Usage
 
-### 8. Advanced: Partial Inject (Internal ARC Injection)
-- **Purpose:** Replace specific files inside an existing ARC without full unpacking/repacking.
-- **Usage:**
-  - Load an ARC.
-  - Select a specific file in the tree view.
-  - Click "Replace Selected File..." and choose your new file from disk.
-  - Click "Start Injection".
-- **Behavior:** Creates a new ARC where only the targeted files are replaced; all other data is copied raw from the original.
-
-## CLI Usage
-The tool automatically detects if you pass a file or folder argument, but specific commands are available.
-
-**Usage:** `python SaladSoftware.py [command] [options]`
-
-### Commands
-
-1.  **extract** `<ARC_FILE...>`
-    *   Extracts one or more .arc files into `_arc` folders.
-2.  **inject** `<FOLDER...>` `--output-dir <DIR>`
-    *   Builds new ARCs from source folders (Scratch rebuild).
-3.  **extract-recursive** `<SOURCE_DIR>`
-    *   Recursively finds and extracts all ARCs in a directory.
-4.  **inject-recursive** `<SOURCE_DIR>` `[--move-originals]`
-    *   In-place recursive rebuild. Scans for `name.arc` + `name_arc` pairs.
-    *   Uses high-fidelity repacking.
-5.  **extract-flat** `<SOURCE_PATH>` `--output-dir <DIR>`
-    *   Extracts all files from an ARC or directory of ARCs into one flat folder.
-6.  **install-menu**
-    *   **(Windows Only)** Installs context menu items:
-        *   Right-click .arc file -> **Extract ARC**
-        *   Right-click Folder -> **Rebuild ARC**
-
-## Compiling
-To compile this into a standalone EXE (Windows), use PyInstaller. Ensure `tkinterdnd2` is installed in your environment.
+Run the main application:
 
 ```bash
-pyinstaller --onefile --windowed --icon salad_icon.ico --name "SaladSoftware 2.4.1" --add-data "extension_index_line.txt;." --add-data "unique_extensions.txt;." --collect-all tkinterdnd2 SaladSoftware.py
+python SaladSoftware.py
 ```
-*(Note: `--collect-all tkinterdnd2` is often required to ensure the drag-and-drop binaries are bundled correctly).*
 
+Navigate to the **MT: Revil Conversion** tab, select your assets folder and the path to your RevilToolset utilities, and click **Start Revil Conversion**.

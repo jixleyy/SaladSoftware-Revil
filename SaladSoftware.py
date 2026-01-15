@@ -6,7 +6,14 @@ from tkinter import ttk, filedialog, messagebox, scrolledtext, simpledialog
 import tkinter.font as tkFont
 import os
 import sys
+import subprocess
+import json
 import hashlib
+
+# Ensure the script directory is in sys.path
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
 import struct
 import zlib
 import io
@@ -833,6 +840,90 @@ def recursive_flatten_extract(source_root_dir, common_output_dir, progress_callb
         return
     run_batch_parallel(_flatten_extract_worker, arc_files, common_output_dir, progress_callback, status_callback, key1, key2)
 
+def revil_conversion(source_root_dir, _, progress_callback, status_callback, key1, key2, **kwargs):
+    source_path = pathlib.Path(source_root_dir)
+    config = kwargs.get('config', {})
+    
+    root_path = pathlib.Path(config.get("revil_toolset_path", ".")).resolve()
+    mod_to_gltf = root_path / "mod_to_gltf.cmd"
+    lmt_to_gltf = root_path / "lmt_to_gltf.cmd"
+
+    # STEP 0: EXTRACT ARCs
+    if config.get("extract_arcs"):
+        arc_files = list(source_path.rglob("*.arc") if config.get("recursive_search") else source_path.glob("*.arc"))
+        if arc_files:
+            status_callback(f"Found {len(arc_files)} .arc files. Extracting...", STATUS_INFO)
+            for arc_path in arc_files:
+                status_callback(f"Extracting {arc_path.name}...", STATUS_DEBUG)
+                _list_extract_worker(str(arc_path), None, None, None, status_callback)
+            status_callback("Extraction complete.", STATUS_SUCCESS)
+
+    # PROCESS MODS
+    mod_files = sorted(source_path.rglob("*.mod") if config.get("recursive_search") else source_path.glob("*.mod"))
+    if not mod_files:
+        status_callback("No .mod files found.", STATUS_WARN)
+        return
+
+    total = len(mod_files)
+    for i, mod_path in enumerate(mod_files):
+        current_dir = mod_path.parent
+        glb_path = mod_path.with_suffix('.glb')
+        
+        status_callback(f"[{i+1}/{total}] Converting {mod_path.name} to GLB...", STATUS_INFO)
+
+        # STEP 1: MOD -> GLB
+        try:
+            subprocess.run([str(mod_to_gltf), str(mod_path)], capture_output=True, check=True)
+        except Exception as e:
+            status_callback(f"Error converting {mod_path.name}: {e}", STATUS_ERROR)
+            continue
+
+        if not glb_path.is_file():
+            status_callback(f"Failed to find GLB for {mod_path.name}", STATUS_ERROR)
+            continue
+
+        # STEP 2: LMT pairing
+        all_lmt_files = sorted(current_dir.glob("*.lmt"))
+        if config.get("smart_lmt_pairing"):
+            lmt_files = [f for f in all_lmt_files if f.stem.startswith(mod_path.stem)]
+            if not lmt_files: lmt_files = all_lmt_files
+        else:
+            lmt_files = all_lmt_files
+
+        if not lmt_files:
+            status_callback(f"No LMTs found for {mod_path.name}, skipping animation.", STATUS_DEBUG)
+            if progress_callback: progress_callback((i + 1) / total * 100)
+            continue
+
+        status_callback(f"Pairing {mod_path.name} with {len(lmt_files)} animations...", STATUS_DEBUG)
+        batch_data = [[glb_path.name] + [f.name for f in lmt_files]]
+        batch_json_path = current_dir / f"{glb_path.name}_batch.json"
+
+        with batch_json_path.open("w", encoding="ascii") as f:
+            json.dump(batch_data, f, separators=(',', ':'))
+        
+        # STEP 3: LMT batch
+        try:
+            subprocess.run([str(lmt_to_gltf), str(batch_json_path)], cwd=str(current_dir), capture_output=True, check=True)
+        except Exception as e:
+            status_callback(f"Error in LMT batch for {mod_path.name}: {e}", STATUS_ERROR)
+            continue
+
+        # Check output
+        suffix = config.get("output_suffix", "_out")
+        out_path = glb_path.with_name(glb_path.stem + suffix + ".glb")
+        if out_path.is_file():
+            status_callback(f"Success: Created {out_path.name}", STATUS_SUCCESS)
+            if config.get("cleanup_batch_json"):
+                batch_json_path.unlink(missing_ok=True)
+        else:
+            status_callback(f"LMT conversion finished but output not found for {mod_path.name}", STATUS_WARN)
+        
+        if progress_callback:
+            progress_callback((i + 1) / total * 100)
+
+    status_callback("All Revil conversions complete.", STATUS_SUCCESS)
+
 def run_batch_parallel(worker_func, item_list, output_dir, progress_callback, status_callback, key1, key2, **kwargs):
     if not item_list: return []
     results = []
@@ -912,6 +1003,7 @@ class ArcToolApp:
         self.flatten_extract_frame = ttk.Frame(self.notebook, style='TFrame', padding=10)
         self.internal_arc_extract_frame = ttk.Frame(self.notebook, style='TFrame', padding=10)
         self.internal_arc_inject_frame = ttk.Frame(self.notebook, style='TFrame', padding=10)
+        self.revil_conv_frame = ttk.Frame(self.notebook, style='TFrame', padding=10)
 
         self.notebook.add(self.list_extract_frame, text='1. Extract from ARC(s)')
         self.notebook.add(self.folder_inject_frame, text='2. Repack Folder (In-Place)')
@@ -921,6 +1013,7 @@ class ArcToolApp:
         self.notebook.add(self.flatten_extract_frame, text='Batch: Extract All (Single Folder)')
         self.notebook.add(self.internal_arc_extract_frame, text='Advanced: Partial Extract')
         self.notebook.add(self.internal_arc_inject_frame, text='Advanced: Partial Inject')
+        self.notebook.add(self.revil_conv_frame, text='MT: Revil Conversion')
 
         self.notebook.pack(pady=5, padx=10, expand=True, fill='both')
 
@@ -932,6 +1025,7 @@ class ArcToolApp:
         self.create_flatten_extract_widgets()
         self.create_internal_arc_extract_widgets()
         self.create_internal_arc_inject_widgets()
+        self.create_revil_conv_widgets()
 
         self.bottom_pane_frame = ttk.Frame(self.main_paned_window, style='TFrame')
         self.main_paned_window.add(self.bottom_pane_frame, weight=1)
@@ -1181,8 +1275,91 @@ class ArcToolApp:
         output_frame = ttk.Frame(frame)
         output_frame.grid(row=2, column=0, sticky='ews', pady=(2,0))
         self._create_dir_input(output_frame, "Output Directory for Selected Items:", 0, "internal_extract_output_var")
-        self.btn_internal_extract = ttk.Button(frame, text="Extract Selected Items", command=self.start_internal_arc_extraction)
-        self.btn_internal_extract.grid(row=3, column=0, pady=(10,10), padx=5)
+        
+        button_container = ttk.Frame(frame)
+        button_container.grid(row=3, column=0, pady=(10,10), padx=5)
+        
+        self.btn_internal_extract = ttk.Button(button_container, text="Extract Selected Items", command=self.start_internal_arc_extraction)
+        self.btn_internal_extract.pack(side=tk.LEFT, padx=5)
+
+        self.btn_internal_mod_to_glb = ttk.Button(button_container, text="MOD to GLB", command=self.start_internal_mod_to_glb)
+        self.btn_internal_mod_to_glb.pack(side=tk.LEFT, padx=5)
+
+    def start_internal_mod_to_glb(self):
+        self.save_revil_config()
+        if not self.current_arc_for_internal_view or not self.current_arc_for_internal_view.files:
+            messagebox.showwarning("No ARC Loaded", "Please load an ARC file into the preview first.")
+            return
+        
+        output_dir = self.internal_extract_output_var.get()
+        if not output_dir:
+            messagebox.showwarning("Output Missing", "Please select an output directory.")
+            return
+
+        selected_mods = []
+        for item_iid in self.internal_arc_tree.get_children(''):
+            self._find_checked_mods(item_iid, selected_mods)
+
+        if not selected_mods:
+            messagebox.showinfo("Nothing Selected", "No .mod files are checked for conversion.")
+            return
+
+        self.add_status_message(f"Preparing to convert {len(selected_mods)} .mod file(s)...", STATUS_INFO)
+        self.btn_internal_mod_to_glb.config(state=tk.DISABLED)
+        
+        toolset_path = self.revil_toolset_path_var.get()
+        arc_path = self.internal_arc_filepath_var.get()
+        
+        self._run_task(self._perform_internal_mod_to_glb_thread, args_tuple=(selected_mods, arc_path, output_dir, toolset_path), 
+                       finished_callback=lambda: self.btn_internal_mod_to_glb.config(state=tk.NORMAL))
+
+    def _find_checked_mods(self, item_iid, selected_mods):
+        data = self.tree_item_data.get(item_iid)
+        if not data: return
+        
+        if data['is_folder']:
+            for child in self.internal_arc_tree.get_children(item_iid):
+                self._find_checked_mods(child, selected_mods)
+        elif data['checked_state']:
+            fi = data['file_info']
+            if fi['full_filename'].lower().endswith('.mod'):
+                selected_mods.append(fi)
+
+    def _perform_internal_mod_to_glb_thread(self, mods, arc_path, output_dir_str, toolset_path_str, progress_callback, status_callback, key1, key2):
+        try:
+            output_dir = pathlib.Path(output_dir_str)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            toolset_path = pathlib.Path(toolset_path_str).resolve()
+            mod_to_gltf = toolset_path / "mod_to_gltf.cmd"
+            
+            arc = self.current_arc_for_internal_view
+            total = len(mods)
+            
+            for i, fi in enumerate(mods):
+                status_callback(f"Converting {fi['full_filename']}...", STATUS_INFO)
+                
+                # Extract mod to temp
+                temp_mod_path = output_dir / pathlib.Path(fi['full_filename']).name
+                file_data = arc.extract_file(fi, arc_path)
+                with open(get_safe_path_str(temp_mod_path), 'wb') as f:
+                    f.write(file_data)
+                
+                # Convert
+                try:
+                    subprocess.run([str(mod_to_gltf), str(temp_mod_path)], capture_output=True, check=True)
+                    status_callback(f"Successfully converted {fi['full_filename']}", STATUS_SUCCESS)
+                except Exception as e:
+                    status_callback(f"Error converting {fi['full_filename']}: {e}", STATUS_ERROR)
+                finally:
+                    # Cleanup extracted .mod
+                    if temp_mod_path.exists():
+                        temp_mod_path.unlink()
+                
+                progress_callback((i + 1) / total * 100)
+            
+            status_callback("Internal MOD conversion complete.", STATUS_SUCCESS)
+        except Exception as e:
+            status_callback(f"Fatal error during internal MOD conversion: {e}", STATUS_ERROR)
 
     def create_internal_arc_inject_widgets(self):
         frame = self.internal_arc_inject_frame
@@ -1218,11 +1395,90 @@ class ArcToolApp:
         self.clear_injection_map_button.pack(pady=(5,5), fill='x')
         output_frame = ttk.Frame(frame)
         output_frame.grid(row=2, column=0, sticky='ews', pady=(2,0))
-        self._create_file_output_input(output_frame, "Output Rebuilt ARC File (New Name/Location):", 0, "internal_inject_output_var", self.internal_inject_filepath_var)
         info_text = "Select an existing ARC, then pick files to replace. Retains original ARC structure and metadata."
         ttk.Label(frame, text=info_text, style='TLabel', justify=tk.LEFT).grid(row=3, column=0, sticky='w', padx=5, pady=(10,5))
         self.btn_internal_inject = ttk.Button(frame, text="Start Injection", command=self.start_internal_arc_injection)
         self.btn_internal_inject.grid(row=4, column=0, pady=(10,10), padx=5)
+
+    def load_revil_config(self):
+        config_path = pathlib.Path("revil_config.json")
+        if config_path.is_file():
+            try:
+                with open(config_path, "r") as f:
+                    config = json.load(f)
+                    self.revil_toolset_path_var.set(config.get("revil_toolset_path", "."))
+            except Exception as e:
+                self.add_status_message(f"Error loading revil_config.json: {e}", STATUS_DEBUG)
+        else:
+            self.revil_toolset_path_var.set(".")
+
+    def save_revil_config(self):
+        config = {
+            "revil_toolset_path": self.revil_toolset_path_var.get()
+        }
+        try:
+            with open("revil_config.json", "w") as f:
+                json.dump(config, f, indent=4)
+        except Exception as e:
+            self.add_status_message(f"Error saving revil_config.json: {e}", STATUS_DEBUG)
+
+    def create_revil_conv_widgets(self):
+        frame = self.revil_conv_frame
+        frame.grid_columnconfigure(0, weight=1)
+        
+        ttk.Label(frame, text="Purpose: Automate conversion of .mod and .lmt files to .glb using RevilToolset.", style='Header.TLabel').grid(row=0, column=0, sticky='w', pady=(5,0))
+        
+        # Target Folder
+        self._create_dir_input(frame, "Target Assets Folder:", 1, "revil_target_dir_var")
+        
+        # RevilToolset Path
+        self._create_dir_input(frame, "RevilToolset Root Path (where .cmd files are):", 3, "revil_toolset_path_var")
+        
+        # Load saved config if exists
+        self.load_revil_config()
+
+        # Options
+        options_frame = ttk.LabelFrame(frame, text=" Options ", padding="10")
+        options_frame.grid(row=5, column=0, sticky='nsew', pady=10, padx=5)
+        options_frame.columnconfigure(0, weight=1)
+        options_frame.columnconfigure(1, weight=1)
+
+        self.revil_recursive_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(options_frame, text="Recursive Search", variable=self.revil_recursive_var).grid(row=0, column=0, sticky='w')
+
+        self.revil_extract_arcs_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(options_frame, text="Extract ARCs First", variable=self.revil_extract_arcs_var).grid(row=0, column=1, sticky='w')
+
+        self.revil_smart_lmt_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(options_frame, text="Smart LMT Pairing (Name Matching)", variable=self.revil_smart_lmt_var).grid(row=1, column=0, sticky='w')
+
+        self.revil_cleanup_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(options_frame, text="Cleanup Temp Batch Files", variable=self.revil_cleanup_var).grid(row=1, column=1, sticky='w')
+
+        self.btn_start_revil = ttk.Button(frame, text="Start Revil Conversion", command=self.start_revil_conversion)
+        self.btn_start_revil.grid(row=6, column=0, pady=20)
+
+    def start_revil_conversion(self):
+        self.save_revil_config()
+        target_dir = self.revil_target_dir_var.get()
+        toolset_path = self.revil_toolset_path_var.get()
+        
+        if not target_dir or not os.path.isdir(target_dir):
+            messagebox.showwarning("Input Missing", "Please select a valid target assets folder.")
+            return
+        
+        config = {
+            "revil_toolset_path": toolset_path,
+            "recursive_search": self.revil_recursive_var.get(),
+            "extract_arcs": self.revil_extract_arcs_var.get(),
+            "smart_lmt_pairing": self.revil_smart_lmt_var.get(),
+            "cleanup_batch_json": self.revil_cleanup_var.get(),
+            "output_suffix": "_out"
+        }
+
+        self.btn_start_revil.config(state='disabled')
+        self._run_task(revil_conversion, args_tuple=(target_dir, None), kwargs_dict={'config': config}, 
+                       finished_callback=lambda: self.btn_start_revil.config(state='normal'))
 
     def setup_drag_and_drop(self):
         self.list_extract_listbox.drop_target_register(DND_FILES)
@@ -1233,6 +1489,8 @@ class ArcToolApp:
         self.internal_arc_extract_frame.dnd_bind('<<Drop>>', self.handle_drop_internal_arc_extract)
         self.internal_arc_inject_frame.drop_target_register(DND_FILES)
         self.internal_arc_inject_frame.dnd_bind('<<Drop>>', self.handle_drop_internal_arc_inject)
+        self.revil_conv_frame.drop_target_register(DND_FILES)
+        self.revil_conv_frame.dnd_bind('<<Drop>>', self.handle_drop_revil_conv)
         self.add_status_message("Drag and drop initialized for relevant tabs.", STATUS_DEBUG)
 
     def _parse_dropped_files(self, event_data_str):
@@ -1325,11 +1583,28 @@ class ArcToolApp:
                 return
             self.internal_inject_filepath_var.set(dropped_arc_file_path)
             self.load_arc_into_inject_treeview(dropped_arc_file_path)
-            self.add_status_message(f"D&D: Loaded '{os.path.basename(dropped_arc_file_path)}' for internal injection.", STATUS_INFO)
+            self.add_status_message(f"D&D: Loaded '{os.path.basename(dropped_arc_file_path)}' for internal injection preview.", STATUS_INFO)
             self.notebook.select(self.internal_arc_inject_frame)
         except Exception as e:
-            self.add_status_message(f"Error during D&D for Internal ARC Injection: {e}", STATUS_ERROR)
+            self.add_status_message(f"Error during D&D for Internal Injection: {e}", STATUS_ERROR)
             traceback.print_exc(file=sys.stderr)
+
+    def handle_drop_revil_conv(self, event):
+        try:
+            filepaths = self._parse_dropped_files(event.data)
+            if not filepaths: return
+            
+            target = filepaths[0]
+            if target.is_dir():
+                self.revil_target_dir_var.set(str(target))
+                self.add_status_message(f"D&D: Set Revil target folder to '{target.name}'.", STATUS_INFO)
+            elif target.is_file() and target.suffix.lower() == '.arc':
+                self.revil_target_dir_var.set(str(target.parent))
+                self.add_status_message(f"D&D: Set Revil target folder to '{target.parent.name}' (parent of dropped ARC).", STATUS_INFO)
+            
+            self.notebook.select(self.revil_conv_frame)
+        except Exception as e:
+            self.add_status_message(f"Error during D&D for Revil Conversion: {e}", STATUS_ERROR)
 
     def select_list_extract_files(self):
         files = filedialog.askopenfilenames(title="Select ARC Files", filetypes=[("MT ARC","*.arc"),("All Files","*.*")])
@@ -2218,7 +2493,7 @@ if __name__ == "__main__":
                 default_out = str(target.parent)
                 sys.argv.extend(['--output-dir', default_out])
 
-    load_extension_map(resource_path(EXTENSION_MAP_FILE), resource_path(GAME_SPECIFIC_HASH_FILE))
+    load_extension_map(os.path.join(SCRIPT_DIR, EXTENSION_MAP_FILE), os.path.join(SCRIPT_DIR, GAME_SPECIFIC_HASH_FILE))
 
     # If we detected a file for GUI opening, skip argparse CLI logic
     if gui_startup_file:
